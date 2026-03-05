@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { NavLink, Route, Routes, useNavigate } from 'react-router-dom';
 import './App.css';
 import { api } from './api/client';
+import { createApiFlow } from './api/flow';
 import { AuthPage } from './pages/AuthPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ProjectsPage } from './pages/ProjectsPage';
@@ -10,32 +11,57 @@ import { ProjectsPage } from './pages/ProjectsPage';
 function App() {
   const navigate = useNavigate();
   const [user, setUser] = useState(null);
+
+  const [booting, setBooting] = useState(true);
   const [bootError, setBootError] = useState('');
 
+  function handleUnauthorized() {
+    // Centralized auth failure behavior: clear token and send user to auth.
+    api.setToken(null);
+    setUser(null);
+    navigate('/');
+  }
+
+  const bootFlow = useMemo(
+    () =>
+      createApiFlow({
+        operation: 'auth.me',
+        setBusy: setBooting,
+        setError: setBootError,
+        onUnauthorized: handleUnauthorized,
+        call: () => api.me(),
+        onSuccess: (res) => {
+          setUser(res?.user || null);
+        },
+        onError: () => {
+          // Not logged in is OK; keep user null.
+          setUser(null);
+        },
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+
   useEffect(() => {
-    let active = true;
-    setBootError('');
-
-    // Attempt to restore session if a token exists.
-    api
-      .me()
-      .then((res) => {
-        if (!active) return;
-        setUser(res.user);
-      })
-      .catch(() => {
-        // Not logged in is OK; stay on auth.
-      });
-
-    return () => {
-      active = false;
-    };
-  }, []);
+    bootFlow.run();
+  }, [bootFlow]);
 
   function logout() {
     api.setToken(null);
     setUser(null);
     navigate('/');
+  }
+
+  if (booting) {
+    return (
+      <div className="tt-page">
+        <div className="tt-card" style={{ maxWidth: 520, margin: '40px auto' }}>
+          <h2 style={{ marginTop: 0 }}>Team Task Tracker</h2>
+          <p style={{ color: 'var(--tt-muted)' }}>Restoring session…</p>
+          {bootError ? <div style={{ color: 'var(--tt-danger)' }}>{bootError}</div> : null}
+        </div>
+      </div>
+    );
   }
 
   if (!user) {

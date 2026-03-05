@@ -1,33 +1,36 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
+import { createApiFlow } from '../api/flow';
 
 /**
  * PUBLIC_INTERFACE
  * Dashboard showing task stats and recent tasks.
  */
 export function DashboardPage() {
-  const [data, setData] = useState(null);
+  const [stats, setStats] = useState(null);
+  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
+  const flow = useMemo(
+    () =>
+      createApiFlow({
+        operation: 'dashboard.get',
+        setBusy,
+        setError: setErr,
+        call: () => api.getDashboard(),
+        onSuccess: (d) => setStats(d?.stats || null),
+      }),
+    []
+  );
+
   useEffect(() => {
-    let active = true;
-    api
-      .getDashboard()
-      .then((d) => {
-        if (active) setData(d.stats);
-      })
-      .catch((e) => {
-        if (active) setErr(e.message || 'Failed to load dashboard.');
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
+    flow.run();
+  }, [flow]);
 
   if (err) return <div className="tt-card">{err}</div>;
-  if (!data) return <div className="tt-card">Loading…</div>;
+  if (busy || !stats) return <div className="tt-card">Loading…</div>;
 
-  const counts = data.assignedToMeByStatus || {};
+  const counts = stats.assignedToMeByStatus || {};
 
   return (
     <div className="tt-grid">
@@ -45,7 +48,7 @@ export function DashboardPage() {
       <div className="tt-card">
         <h3 style={{ marginTop: 0 }}>Recent updates</h3>
         <div className="tt-grid">
-          {(data.recentTasks || []).map((t) => (
+          {(stats.recentTasks || []).map((t) => (
             <div key={t.id} className="tt-row" style={{ justifyContent: 'space-between' }}>
               <div style={{ minWidth: 0 }}>
                 <strong style={{ display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -59,7 +62,7 @@ export function DashboardPage() {
               <span className="tt-badge">updated {new Date(t.updated_at).toLocaleString()}</span>
             </div>
           ))}
-          {(!data.recentTasks || data.recentTasks.length === 0) ? (
+          {!stats.recentTasks || stats.recentTasks.length === 0 ? (
             <small style={{ color: 'var(--tt-muted)' }}>No recent tasks assigned to you.</small>
           ) : null}
         </div>

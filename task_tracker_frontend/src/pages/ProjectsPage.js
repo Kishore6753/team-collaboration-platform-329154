@@ -1,12 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
+import { createApiFlow } from '../api/flow';
 import { Modal } from '../components/Modal';
+import { CommentsPanel } from '../components/CommentsPanel';
 
 /**
  * PUBLIC_INTERFACE
  * Projects page:
  * - left list of projects
  * - task list for selected project
+ * - task selection + comments for selected task
  * - modals to create project/task
  */
 export function ProjectsPage() {
@@ -18,6 +21,10 @@ export function ProjectsPage() {
   );
 
   const [tasks, setTasks] = useState([]);
+  const [selectedTaskId, setSelectedTaskId] = useState('');
+
+  const [busyProjects, setBusyProjects] = useState(false);
+  const [busyTasks, setBusyTasks] = useState(false);
   const [err, setErr] = useState('');
 
   const [projectModalOpen, setProjectModalOpen] = useState(false);
@@ -32,91 +39,120 @@ export function ProjectsPage() {
   const [newTaskPriority, setNewTaskPriority] = useState('medium');
   const [newTaskDue, setNewTaskDue] = useState('');
 
-  async function refreshProjects() {
-    const res = await api.listProjects();
-    setProjects(res.projects || []);
-    if (!selectedProjectId && res.projects?.[0]?.id) setSelectedProjectId(res.projects[0].id);
-  }
+  const projectsFlow = useMemo(
+    () =>
+      createApiFlow({
+        operation: 'projects.list',
+        setBusy: setBusyProjects,
+        setError: setErr,
+        call: () => api.listProjects(),
+        onSuccess: (res) => {
+          const list = res?.projects || [];
+          setProjects(list);
+          // Keep selection stable; if none selected, pick first.
+          if (!selectedProjectId && list?.[0]?.id) setSelectedProjectId(list[0].id);
+        },
+      }),
+    [selectedProjectId]
+  );
 
-  async function refreshTasks(pid) {
-    if (!pid) {
-      setTasks([]);
-      return;
-    }
-    const res = await api.listTasks(pid);
-    setTasks(res.tasks || []);
-  }
+  const tasksFlow = useMemo(
+    () =>
+      createApiFlow({
+        operation: 'tasks.list',
+        setBusy: setBusyTasks,
+        setError: setErr,
+        call: async () => {
+          if (!selectedProjectId) return { tasks: [] };
+          return api.listTasks(selectedProjectId);
+        },
+        onSuccess: (res) => {
+          const list = res?.tasks || [];
+          setTasks(list);
+
+          // Reset selected task if it no longer exists.
+          if (selectedTaskId && !list.some((t) => t.id === selectedTaskId)) {
+            setSelectedTaskId('');
+          }
+        },
+      }),
+    [selectedProjectId, selectedTaskId]
+  );
 
   useEffect(() => {
-    let active = true;
-    setErr('');
-    refreshProjects().catch((e) => {
-      if (active) setErr(e.message || 'Failed to load projects.');
-    });
-    return () => {
-      active = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    projectsFlow.run();
+  }, [projectsFlow]);
 
   useEffect(() => {
-    let active = true;
-    setErr('');
-    refreshTasks(selectedProjectId).catch((e) => {
-      if (active) setErr(e.message || 'Failed to load tasks.');
-    });
-    return () => {
-      active = false;
-    };
-  }, [selectedProjectId]);
+    setSelectedTaskId('');
+    tasksFlow.run();
+  }, [tasksFlow, selectedProjectId]);
 
   async function createProject(e) {
     e.preventDefault();
     setErr('');
-    try {
-      const res = await api.createProject({ name: newProjectName, description: newProjectDesc });
-      setProjectModalOpen(false);
-      setNewProjectName('');
-      setNewProjectDesc('');
-      await refreshProjects();
-      setSelectedProjectId(res.project.id);
-    } catch (e2) {
-      setErr(e2.message || 'Failed to create project.');
-    }
+
+    const flow = createApiFlow({
+      operation: 'projects.create',
+      setError: setErr,
+      call: async () => api.createProject({ name: newProjectName, description: newProjectDesc }),
+      onSuccess: async (res) => {
+        setProjectModalOpen(false);
+        setNewProjectName('');
+        setNewProjectDesc('');
+        await projectsFlow.run();
+        if (res?.project?.id) setSelectedProjectId(res.project.id);
+      },
+    });
+
+    await flow.run();
   }
 
   async function createTask(e) {
     e.preventDefault();
     if (!selectedProjectId) return;
     setErr('');
-    try {
-      await api.createTask({
-        projectId: selectedProjectId,
-        title: newTaskTitle,
-        description: newTaskDesc,
-        status: newTaskStatus,
-        priority: newTaskPriority,
-        dueDate: newTaskDue ? newTaskDue : null,
-      });
-      setTaskModalOpen(false);
-      setNewTaskTitle('');
-      setNewTaskDesc('');
-      setNewTaskDue('');
-      await refreshTasks(selectedProjectId);
-    } catch (e2) {
-      setErr(e2.message || 'Failed to create task.');
-    }
+
+    const flow = createApiFlow({
+      operation: 'tasks.create',
+      setError: setErr,
+      call: async () =>
+        api.createTask({
+          projectId: selectedProjectId,
+          title: newTaskTitle,
+          description: newTaskDesc,
+          status: newTaskStatus,
+          priority: newTaskPriority,
+          dueDate: newTaskDue ? newTaskDue : null,
+        }),
+      onSuccess: async () => {
+        setTaskModalOpen(false);
+        setNewTaskTitle('');
+        setNewTaskDesc('');
+        setNewTaskDue('');
+        await tasksFlow.run();
+      },
+    });
+
+    await flow.run();
   }
 
   async function quickUpdateTask(task, patch) {
     setErr('');
-    try {
-      await api.updateTask(task.id, patch);
-      await refreshTasks(selectedProjectId);
-    } catch (e2) {
-      setErr(e2.message || 'Failed to update task.');
-    }
+
+    const flow = createApiFlow({
+      operation: 'tasks.update',
+      setError: setErr,
+      call: async () => api.updateTask(task.id, patch),
+      onSuccess: async () => {
+        await tasksFlow.run();
+      },
+    });
+
+    await flow.run();
   }
+
+  const pageBusy = busyProjects || busyTasks;
 
   return (
     <div className="tt-split">
@@ -127,6 +163,11 @@ export function ProjectsPage() {
             New project
           </button>
         </div>
+
+        {pageBusy ? (
+          <small style={{ color: 'var(--tt-muted)', marginTop: 10, display: 'block' }}>Loading…</small>
+        ) : null}
+        {err ? <div style={{ color: 'var(--tt-danger)', marginTop: 10 }}>{err}</div> : null}
 
         <div className="tt-grid" style={{ marginTop: 12 }}>
           {projects.map((p) => (
@@ -141,7 +182,7 @@ export function ProjectsPage() {
               <small style={{ opacity: 0.9 }}>{p.description || '—'}</small>
             </button>
           ))}
-          {projects.length === 0 ? (
+          {projects.length === 0 && !busyProjects ? (
             <small style={{ color: 'var(--tt-muted)' }}>No projects yet. Create one to start.</small>
           ) : null}
         </div>
@@ -166,18 +207,42 @@ export function ProjectsPage() {
             </button>
           </div>
 
-          {err ? <div style={{ color: 'var(--tt-danger)', marginTop: 10 }}>{err}</div> : null}
-
           <div className="tt-grid" style={{ marginTop: 12 }}>
+            {busyTasks ? <small style={{ color: 'var(--tt-muted)' }}>Loading tasks…</small> : null}
+
             {tasks.map((t) => (
-              <div key={t.id} className="tt-row" style={{ justifyContent: 'space-between' }}>
-                <div style={{ minWidth: 0 }}>
+              <div
+                key={t.id}
+                className="tt-row"
+                style={{
+                  justifyContent: 'space-between',
+                  padding: '10px 12px',
+                  border: '1px solid var(--tt-border)',
+                  borderRadius: 12,
+                  background: selectedTaskId === t.id ? 'rgba(59, 130, 246, 0.08)' : 'var(--tt-surface)',
+                }}
+              >
+                <button
+                  type="button"
+                  className="tt-btn"
+                  onClick={() => setSelectedTaskId(t.id)}
+                  style={{
+                    textAlign: 'left',
+                    border: 'none',
+                    background: 'transparent',
+                    padding: 0,
+                    cursor: 'pointer',
+                    flex: 1,
+                    minWidth: 0,
+                  }}
+                >
                   <strong style={{ display: 'block' }}>{t.title}</strong>
                   <small style={{ color: 'var(--tt-muted)' }}>
                     {t.status} · {t.priority}
                     {t.due_date ? ` · due ${t.due_date}` : ''}
                   </small>
-                </div>
+                </button>
+
                 <div className="tt-row" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                   <select
                     className="tt-select"
@@ -203,18 +268,14 @@ export function ProjectsPage() {
                 </div>
               </div>
             ))}
-            {tasks.length === 0 ? (
+
+            {tasks.length === 0 && !busyTasks ? (
               <small style={{ color: 'var(--tt-muted)' }}>No tasks for this project yet.</small>
             ) : null}
           </div>
         </div>
 
-        <div className="tt-card">
-          <h3 style={{ marginTop: 0 }}>Comments</h3>
-          <small style={{ color: 'var(--tt-muted)' }}>
-            Comments UI can be added per-task (API is available at /comments).
-          </small>
-        </div>
+        <CommentsPanel taskId={selectedTaskId} />
       </div>
 
       <Modal open={projectModalOpen} title="Create project" onClose={() => setProjectModalOpen(false)}>
